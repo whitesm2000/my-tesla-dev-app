@@ -415,6 +415,36 @@ async def vehicle_wake(vehicle_id: str):
     return JSONResponse(await _vehicle_post("/wake_up", vehicle_id))
 
 
+@app.get("/api/vehicle/{vehicle_id}/mobile_enabled")
+async def vehicle_mobile_enabled(vehicle_id: str):
+    """Whether the vehicle's mobile API access is enabled."""
+    return JSONResponse(await _vehicle_get("/mobile_enabled", vehicle_id))
+
+
+@app.get("/api/vehicle/{vehicle_id}/service_data")
+async def vehicle_service_data(vehicle_id: str):
+    """Service status for the vehicle."""
+    return JSONResponse(await _vehicle_get("/service_data", vehicle_id))
+
+
+@app.get("/api/vehicle/{vehicle_id}/nearby_charging")
+async def vehicle_nearby_charging(vehicle_id: str):
+    """Charging sites near the vehicle's current location."""
+    return JSONResponse(await _vehicle_get("/nearby_charging_sites", vehicle_id))
+
+
+@app.get("/api/vehicle/{vehicle_id}/release_notes")
+async def vehicle_release_notes(vehicle_id: str):
+    """Firmware release notes for the vehicle."""
+    return JSONResponse(await _vehicle_get("/release_notes", vehicle_id))
+
+
+@app.post("/api/vehicle/{vehicle_id}/fleet_status")
+async def vehicle_fleet_status(vehicle_id: str):
+    """Fleet status: firmware version, telemetry support, virtual key info."""
+    return JSONResponse(await _vehicle_post("/fleet_status", vehicle_id, {"vin": vehicle_id}))
+
+
 @app.get(WELL_KNOWN_PUBLIC_KEY_PATH)
 def serve_tesla_public_key():
     if not os.path.exists(PUBLIC_KEY_PATH):
