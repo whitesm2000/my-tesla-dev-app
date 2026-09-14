@@ -1,4 +1,5 @@
 """Minimal Tesla Fleet API OAuth + webhook sandbox."""
+import json
 import logging
 import os
 import secrets
@@ -13,7 +14,7 @@ log = logging.getLogger("tesla-dev-app")
 
 app = FastAPI(title="my-tesla-dev-app")
 
-TESLA_AUTH_URL = os.getenv("TESLA_AUTH_URL", "https://fleet-auth.prd.na.vn.cloud.tesla.com").rstrip("/")
+TESLA_AUTH_URL = os.getenv("TESLA_AUTH_URL", "https://auth.tesla.com").rstrip("/")
 TESLA_API_URL = os.getenv("TESLA_BASE_URL", "https://fleet-api.prd.na.vn.cloud.tesla.com").rstrip("/")
 TESLA_CLIENT_ID = os.getenv("TESLA_CLIENT_ID", "")
 TESLA_CLIENT_SECRET = os.getenv("TESLA_CLIENT_SECRET", "")
@@ -30,6 +31,8 @@ TOKENS: dict = {}
 STATE_STORE: dict = {}
 STATE_TTL_SECONDS = 600
 
+TOKEN_STORE_PATH = os.getenv("TOKEN_STORE_PATH", "/var/data/tesla_tokens.json")
+
 
 def _now() -> int:
     return int(time.time())
@@ -40,6 +43,34 @@ def _purge_expired_states() -> None:
     expired = [s for s, ts in STATE_STORE.items() if ts < cutoff]
     for s in expired:
         STATE_STORE.pop(s, None)
+
+
+def _load_tokens() -> None:
+    global TOKENS
+    try:
+        with open(TOKEN_STORE_PATH, "r") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            TOKENS = data
+            log.info("Loaded %d token entries from %s", len(TOKENS), TOKEN_STORE_PATH)
+    except FileNotFoundError:
+        log.info("No token store found at %s (fresh start)", TOKEN_STORE_PATH)
+    except Exception as exc:
+        log.warning("Failed to load tokens from %s: %s", TOKEN_STORE_PATH, exc)
+
+
+def _save_tokens() -> bool:
+    try:
+        os.makedirs(os.path.dirname(TOKEN_STORE_PATH), exist_ok=True)
+        with open(TOKEN_STORE_PATH, "w") as f:
+            json.dump(TOKENS, f, indent=2)
+        return True
+    except Exception as exc:
+        log.warning("Failed to save tokens to %s: %s", TOKEN_STORE_PATH, exc)
+        return False
+
+
+_load_tokens()
 
 
 @app.get("/")
@@ -124,20 +155,30 @@ async def auth_tesla_callback(request: Request):
     tokens = resp.json()
     tokens["_obtained_at"] = _now()
     TOKENS["default"] = tokens
+    saved = _save_tokens()
     log.info(
+        "Tokens stored: type=%s expires_in=%s scope=%s has_refresh=%s persisted=%s",
+        tokens.get("token_type"),
+        tokens.get("expires_in"),
+        tokens.get("scope"),
+        bool(tokens.get("refresh_token")),
+        saved,
+    )
         "Tokens stored: type=%s expires_in=%s scope=%s has_refresh=%s",
         tokens.get("token_type"),
         tokens.get("expires_in"),
         tokens.get("scope"),
         bool(tokens.get("refresh_token")),
     )
-    return JSONResponse(
+return JSONResponse(
         {
             "ok": True,
             "token_type": tokens.get("token_type"),
             "expires_in": tokens.get("expires_in"),
             "scope": tokens.get("scope"),
             "has_refresh_token": bool(tokens.get("refresh_token")),
+            "persisted": saved,
+            "store_path": TOKEN_STORE_PATH,
         }
     )
 
@@ -154,7 +195,31 @@ def debug_tokens():
             "scope": v.get("scope"),
             "has_refresh_token": bool(v.get("refresh_token")),
         }
-    return {"keys": list(TOKENS.keys()), "tokens": out}
+    return {"keys": list(TOKENS.keys()), "tokens": out, "store_path": TOKEN_STORE_PATH}
+
+
+@app.get("/debug/persistence")
+def debug_persistence():
+    """Check whether the configured TOKEN_STORE_PATH is writable + readable."""
+    import tempfile
+
+    info = {
+        "store_path": TOKEN_STORE_PATH,
+        "store_dir_exists": os.path.isdir(os.path.dirname(TOKEN_STORE_PATH)),
+        "store_writable": False,
+        "store_readable": False,
+        "tokens_loaded": len(TOKENS),
+    }
+    try:
+        os.makedirs(os.path.dirname(TOKEN_STORE_PATH), exist_ok=True)
+        with open(TOKEN_STORE_PATH, "a") as f:
+            pass
+        info["store_writable"] = os.access(TOKEN_STORE_PATH, os.W_OK)
+        info["store_readable"] = os.access(TOKEN_STORE_PATH, os.R_OK)
+    except Exception as exc:
+        info["error"] = str(exc)
+    info["tmp_writable"] = tempfile.mkstemp()[1] != ""
+    return info
 
 
 @app.get("/api/vehicles")
