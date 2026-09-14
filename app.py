@@ -324,23 +324,22 @@ async def register_partner():
         raise HTTPException(status_code=500, detail="missing client credentials")
 
     domain = TESLA_REDIRECT_URI.split("//", 1)[-1].split("/", 1)[0]
-    root_domain = ".".join(domain.split(".")[-2:])
     public_key_pem = open(PUBLIC_KEY_PATH, "rb").read().decode()
 
     tok = await _mint_partner_token()
     url = f"{TESLA_API_URL}/api/1/partner_accounts"
-    log.info("Registering partner account (domain=%s, root=%s)", domain, root_domain)
+    log.info("Registering partner account (domain=%s)", domain)
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(
             url,
             headers={"Authorization": f"Bearer {tok['access_token']}"},
-            json={"domain": root_domain, "public_key": public_key_pem},
+            json={"domain": domain, "public_key": public_key_pem},
         )
     return JSONResponse(
         {
             "status": resp.status_code,
             "body": resp.text[:2000],
-            "registered_domain": root_domain,
+            "registered_domain": domain,
         },
         status_code=resp.status_code if resp.status_code < 400 else 502,
     )
