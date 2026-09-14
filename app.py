@@ -122,6 +122,21 @@ def _load_or_generate_keypair() -> None:
 _load_tokens()
 _load_or_generate_keypair()
 
+API_TOKEN = os.getenv("TESLA_API_TOKEN", "")
+PUBLIC_PATHS = ("/login", "/auth/tesla/callback", "/.well-known/", "/health", "/webhook/")
+
+
+@app.middleware("http")
+async def require_api_token(request: Request, call_next):
+    """Bearer-token gate for everything except the OAuth redirect flow,
+    the Tesla-required public key, health checks, and inbound webhooks."""
+    if API_TOKEN and not any(request.url.path.startswith(p) for p in PUBLIC_PATHS):
+        auth = request.headers.get("authorization", "")
+        if auth != f"Bearer {API_TOKEN}":
+            return JSONResponse({"detail": "unauthorized"}, status_code=401)
+    return await call_next(request)
+
+
 
 @app.get("/")
 def root():
