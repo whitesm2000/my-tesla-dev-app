@@ -183,9 +183,7 @@ vehicles           partner_accounts vehicles/...
 
 ## Known limitations / TODO
 
-- **Signed commands**: Tesla now requires the Vehicle Command Protocol (Schnorr on secp256r1 + protobuf) for newer vehicles. Currently commands work only on older vehicles (e.g. 2021 Model X). To support Model 3 (2020+) and Cybertruck (2024+), either:
-  - Run Tesla's official [`tesla-http-proxy`](https://github.com/teslamotors/vehicle-command) Go binary as a sidecar, OR
-  - Implement Schnorr + protobuf signing in Python (~350 LoC)
+- **Signed commands: DONE.** `tesla-http-proxy` (Tesla's official Go signer) is built during each deploy and runs alongside the API on `127.0.0.1:8081` (HTTPS, self-signed cert), sharing the `/var/data` disk so it signs with the registered private key. Commands auto-fall back to the proxy when Tesla replies "Command Protocol required". Verified working on Model 3 (2020) and Cybertruck (2024) after virtual-key pairing via `https://tesla.com/_ak/<domain>?vin=<VIN>` links (note: the asterisks in Tesla's docs are placeholder markup — do not include them).
 - **Webhooks**: `/webhook/tesla` is a stub. Need to:
   - Verify Tesla's signature header (uses the registered EC public key)
   - Implement `fleet_telemetry_config` registration so Tesla pushes events
