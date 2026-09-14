@@ -164,13 +164,7 @@ async def auth_tesla_callback(request: Request):
         bool(tokens.get("refresh_token")),
         saved,
     )
-        "Tokens stored: type=%s expires_in=%s scope=%s has_refresh=%s",
-        tokens.get("token_type"),
-        tokens.get("expires_in"),
-        tokens.get("scope"),
-        bool(tokens.get("refresh_token")),
-    )
-return JSONResponse(
+    return JSONResponse(
         {
             "ok": True,
             "token_type": tokens.get("token_type"),
