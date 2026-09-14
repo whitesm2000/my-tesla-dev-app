@@ -280,10 +280,38 @@ async def _user_token() -> str:
     token_data = TOKENS.get("default")
     if not token_data:
         raise HTTPException(status_code=401, detail="no tokens stored; visit /login first")
-    access_token = token_data.get("access_token")
-    if not access_token:
-        raise HTTPException(status_code=500, detail="stored token has no access_token field")
-    return access_token
+    obtained_at = token_data.get("_obtained_at", 0)
+    expires_in = token_data.get("expires_in", 0)
+    # Refresh 5 minutes before expiry
+    if _now() >= obtained_at + expires_in - 300:
+        log.info("Access token expired/expiring; refreshing")
+        refresh_token = token_data.get("refresh_token")
+        if not refresh_token:
+            raise HTTPException(status_code=401, detail="access token expired and no refresh_token; visit /login again")
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                f"{TESLA_AUTH_URL}/oauth2/v3/token",
+                data={
+                    "grant_type": "refresh_token",
+                    "client_id": TESLA_CLIENT_ID,
+                    "client_secret": TESLA_CLIENT_SECRET,
+                    "refresh_token": refresh_token,
+                },
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+        if resp.status_code != 200:
+            log.error("Refresh failed (%s): %s", resp.status_code, resp.text[:300])
+            raise HTTPException(
+                status_code=resp.status_code,
+                detail={"error": "refresh_failed", "body": resp.text[:500]},
+            )
+        new_tokens = resp.json()
+        new_tokens["_obtained_at"] = _now()
+        TOKENS["default"] = new_tokens
+        _save_tokens()
+        log.info("Refreshed access token, expires_in=%s", new_tokens.get("expires_in"))
+        return new_tokens["access_token"]
+    return token_data["access_token"]
 
 
 async def _vehicle_get(path: str, vehicle_id: str | None = None) -> dict:
