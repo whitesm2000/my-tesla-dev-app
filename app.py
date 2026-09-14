@@ -473,6 +473,114 @@ async def vehicle_fleet_status(vehicle_id: str):
     return JSONResponse(await _vehicle_post("/fleet_status", vehicle_id, {"vin": vehicle_id}))
 
 
+# ---- Commands ----
+# Each command requires ?confirm=true to execute (safety).
+# Note: newer vehicles / firmware require commands to be signed with the
+# Tesla Vehicle Command Protocol. We forward to Tesla's signed_command /
+# command/* endpoints; if Tesla rejects for signing, the response will say so.
+
+def _require_confirm(confirm: str | None, command_name: str):
+    if confirm != "true":
+        raise HTTPException(
+            status_code=400,
+            detail=f"command '{command_name}' requires ?confirm=true to execute (safety)",
+        )
+
+
+async def _vehicle_command(vehicle_id: str, command: str, body: dict | None = None) -> dict:
+    """Forward a command to Tesla. Returns raw response or error dict."""
+    token = await _user_token()
+    url = f"{TESLA_API_URL}/api/1/vehicles/{vehicle_id}/command/{command}"
+    log.info("command %s on %s body=%s", command, vehicle_id, body)
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(
+            url,
+            headers={"Authorization": f"Bearer {token}"},
+            json=body or {},
+        )
+    if resp.status_code not in (200, 201, 202):
+        log.error("command %s -> %s: %s", command, resp.status_code, resp.text[:400])
+        return {"error": "tesla_api_error", "status": resp.status_code, "body": resp.text[:1500]}
+    return resp.json() if resp.text else {"ok": True}
+
+
+@app.post("/api/vehicle/{vehicle_id}/flash_lights")
+async def cmd_flash_lights(vehicle_id: str, confirm: str | None = None):
+    _require_confirm(confirm, "flash_lights")
+    return JSONResponse(await _vehicle_command(vehicle_id, "flash_lights"))
+
+
+@app.post("/api/vehicle/{vehicle_id}/honk_horn")
+async def cmd_honk_horn(vehicle_id: str, confirm: str | None = None):
+    _require_confirm(confirm, "honk_horn")
+    return JSONResponse(await _vehicle_command(vehicle_id, "honk_horn"))
+
+
+@app.post("/api/vehicle/{vehicle_id}/lock")
+async def cmd_lock(vehicle_id: str, confirm: str | None = None):
+    _require_confirm(confirm, "lock")
+    return JSONResponse(await _vehicle_command(vehicle_id, "door_lock"))
+
+
+@app.post("/api/vehicle/{vehicle_id}/unlock")
+async def cmd_unlock(vehicle_id: str, confirm: str | None = None):
+    _require_confirm(confirm, "unlock")
+    return JSONResponse(await _vehicle_command(vehicle_id, "door_unlock"))
+
+
+@app.post("/api/vehicle/{vehicle_id}/charge_start")
+async def cmd_charge_start(vehicle_id: str, confirm: str | None = None):
+    _require_confirm(confirm, "charge_start")
+    return JSONResponse(await _vehicle_command(vehicle_id, "charge_start"))
+
+
+@app.post("/api/vehicle/{vehicle_id}/charge_stop")
+async def cmd_charge_stop(vehicle_id: str, confirm: str | None = None):
+    _require_confirm(confirm, "charge_stop")
+    return JSONResponse(await _vehicle_command(vehicle_id, "charge_stop"))
+
+
+@app.post("/api/vehicle/{vehicle_id}/charge_port_open")
+async def cmd_charge_port_open(vehicle_id: str, confirm: str | None = None):
+    _require_confirm(confirm, "charge_port_open")
+    return JSONResponse(await _vehicle_command(vehicle_id, "charge_port_door_open"))
+
+
+@app.post("/api/vehicle/{vehicle_id}/charge_port_close")
+async def cmd_charge_port_close(vehicle_id: str, confirm: str | None = None):
+    _require_confirm(confirm, "charge_port_close")
+    return JSONResponse(await _vehicle_command(vehicle_id, "charge_port_door_close"))
+
+
+@app.post("/api/vehicle/{vehicle_id}/climate_on")
+async def cmd_climate_on(vehicle_id: str, confirm: str | None = None):
+    _require_confirm(confirm, "climate_on")
+    return JSONResponse(await _vehicle_command(vehicle_id, "auto_conditioning_start"))
+
+
+@app.post("/api/vehicle/{vehicle_id}/climate_off")
+async def cmd_climate_off(vehicle_id: str, confirm: str | None = None):
+    _require_confirm(confirm, "climate_off")
+    return JSONResponse(await _vehicle_command(vehicle_id, "auto_conditioning_stop"))
+
+
+@app.post("/api/vehicle/{vehicle_id}/set_charge_limit")
+async def cmd_set_charge_limit(vehicle_id: str, percent: int, confirm: str | None = None):
+    _require_confirm(confirm, "set_charge_limit")
+    if not 50 <= percent <= 100:
+        raise HTTPException(status_code=400, detail="percent must be between 50 and 100")
+    return JSONResponse(await _vehicle_command(vehicle_id, "set_charge_limit", {"percent": percent}))
+
+
+@app.post("/api/vehicle/{vehicle_id}/set_temps")
+async def cmd_set_temps(vehicle_id: str, driver: float, passenger: float | None = None, confirm: str | None = None):
+    _require_confirm(confirm, "set_temps")
+    body = {"driver_temp": driver}
+    if passenger is not None:
+        body["passenger_temp"] = passenger
+    return JSONResponse(await _vehicle_command(vehicle_id, "set_temps", body))
+
+
 @app.get(WELL_KNOWN_PUBLIC_KEY_PATH)
 def serve_tesla_public_key():
     if not os.path.exists(PUBLIC_KEY_PATH):
