@@ -38,6 +38,25 @@ TOKEN_STORE_PATH = os.getenv("TOKEN_STORE_PATH", "/var/data/tesla_tokens.json")
 PRIVATE_KEY_PATH = os.getenv("PRIVATE_KEY_PATH", "/var/data/tesla_private_key.pem")
 PUBLIC_KEY_PATH = os.getenv("PUBLIC_KEY_PATH", "/var/data/tesla_public_key.pem")
 WELL_KNOWN_PUBLIC_KEY_PATH = "/.well-known/appspecific/com.tesla.3p.public-key.pem"
+PROXY_URL = os.getenv("TESLA_PROXY_URL", "http://127.0.0.1:8081")
+
+_VIN_CACHE: dict = {}
+
+
+async def _id_to_vin(vehicle_id: str) -> str:
+    """Map a numeric vehicle id to its VIN (proxy endpoints key on VIN)."""
+    if vehicle_id in _VIN_CACHE:
+        return _VIN_CACHE[vehicle_id]
+    token = await _user_token()
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get(
+            f"{TESLA_API_URL}/api/1/vehicles",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    if resp.status_code == 200:
+        for v in resp.json().get("response", []):
+            _VIN_CACHE[str(v["id"])] = v["vin"]
+    return _VIN_CACHE.get(vehicle_id, vehicle_id)
 
 
 def _now() -> int:
@@ -488,7 +507,11 @@ def _require_confirm(confirm: str | None, command_name: str):
 
 
 async def _vehicle_command(vehicle_id: str, command: str, body: dict | None = None) -> dict:
-    """Forward a command to Tesla. Returns raw response or error dict."""
+    """Forward a command to Tesla. Returns raw response or error dict.
+
+    Newer vehicles reject unsigned commands ("Tesla Vehicle Command Protocol
+    required"). When that happens, retry through the local tesla-http-proxy,
+    which signs the command with the app's virtual key private key."""
     token = await _user_token()
     url = f"{TESLA_API_URL}/api/1/vehicles/{vehicle_id}/command/{command}"
     log.info("command %s on %s body=%s", command, vehicle_id, body)
@@ -498,10 +521,36 @@ async def _vehicle_command(vehicle_id: str, command: str, body: dict | None = No
             headers={"Authorization": f"Bearer {token}"},
             json=body or {},
         )
+    if resp.status_code == 403 and "Command Protocol required" in resp.text:
+        log.info("vehicle %s requires signed commands; retrying via proxy", vehicle_id)
+        return await _proxy_command(vehicle_id, command, token, body)
     if resp.status_code not in (200, 201, 202):
         log.error("command %s -> %s: %s", command, resp.status_code, resp.text[:400])
         return {"error": "tesla_api_error", "status": resp.status_code, "body": resp.text[:1500]}
     return resp.json() if resp.text else {"ok": True}
+
+
+async def _proxy_command(vehicle_id: str, command: str, token: str, body: dict | None = None) -> dict:
+    """Send a command through the local tesla-http-proxy (signed)."""
+    vin = await _id_to_vin(vehicle_id)
+    url = f"{PROXY_URL}/api/1/vehicles/{vin}/command/{command}"
+    log.info("proxy command %s on vin %s", command, vin)
+    try:
+        async with httpx.AsyncClient(timeout=90) as client:
+            resp = await client.post(
+                url,
+                headers={"Authorization": f"Bearer {token}"},
+                json=body or {},
+            )
+    except httpx.ConnectError:
+        return {"error": "proxy_unavailable", "detail": f"cannot reach command proxy at {PROXY_URL}; is tesla-http-proxy running?"}
+    try:
+        data = resp.json() if resp.text else {"ok": True}
+    except ValueError:
+        data = {"raw": resp.text[:1000]}
+    data["_via"] = "signed_proxy"
+    data["_proxy_status"] = resp.status_code
+    return data
 
 
 @app.post("/api/vehicle/{vehicle_id}/flash_lights")
@@ -655,6 +704,86 @@ async def webhook_tesla(request: Request):
     body = await request.body()
     log.info("Webhook received (%d bytes)", len(body))
     return JSONResponse({"received": True, "bytes": len(body)})
+
+
+@app.get("/debug/proxy")
+async def debug_proxy():
+    """Is the local tesla-http-proxy alive?"""
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            resp = await client.get(PROXY_URL)
+        return {"proxy_url": PROXY_URL, "alive": True, "status": resp.status_code}
+    except httpx.ConnectError:
+        return {"proxy_url": PROXY_URL, "alive": False}
+
+
+@app.get("/enroll")
+async def enroll_keys():
+    """Page for pairing this app's virtual key with each vehicle.
+
+    Uses Tesla's deep-link flow: https://tesla.com/_ak/*<domain>* opens the
+    Tesla app and walks the owner through adding the key to a vehicle."""
+    import base64
+    import io
+
+    import qrcode
+    from fastapi.responses import HTMLResponse
+
+    domain = TESLA_REDIRECT_URI.split("//", 1)[-1].split("/", 1)[0]
+    vehicles = []
+    token = await _user_token()
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(
+                f"{TESLA_API_URL}/api/1/vehicles",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        if resp.status_code == 200:
+            vehicles = resp.json().get("response", [])
+    except Exception as exc:
+        log.warning("enroll: could not list vehicles: %s", exc)
+
+    cards = []
+    for v in vehicles:
+        link = f"https://tesla.com/_ak/*{domain}*?vin={v['vin']}"
+        img = qrcode.make(link)
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        qr_b64 = base64.b64encode(buf.getvalue()).decode()
+        name = v.get("display_name") or v["vin"]
+        state = v.get("state", "unknown")
+        cards.append(
+            f"<div class='card'><h2>{name}</h2>"
+            f"<p class='vin'>{v['vin']} &middot; {state}</p>"
+            f"<img src='data:image/png;base64,{qr_b64}' alt='QR for {name}'/>"
+            f"<p><a href='{link}'>Open pairing link on this phone</a></p>"
+            f"<p class='mono'>{link}</p></div>"
+        )
+
+    html = f"""<!doctype html><html><head><meta charset='utf-8'>
+<meta name='viewport' content='width=device-width, initial-scale=1'>
+<title>Enroll app key</title><style>
+body{{font-family:-apple-system,system-ui,sans-serif;max-width:720px;margin:2rem auto;padding:0 1rem;background:#111;color:#eee}}
+.card{{background:#1d1d1f;border:1px solid #333;border-radius:12px;padding:1.25rem;margin:1rem 0;text-align:center}}
+img{{width:220px;height:220px;background:#fff;padding:8px;border-radius:8px}}
+a{{color:#4da3ff}}
+.vin{{color:#999;font-size:.9rem}}
+.mono{{font-family:monospace;font-size:.7rem;color:#777;word-break:break-all}}
+ol{{line-height:1.7}}
+</style></head><body>
+<h1>Pair this app with your vehicles</h1>
+<p>Newer vehicles require a <b>virtual key</b> before accepting commands from this app.
+Open each link below <b>on a phone that has the Tesla app installed and is signed in as the owner</b>:</p>
+<ol>
+<li>Tap a pairing link (or scan the QR with the phone's camera)</li>
+<li>The Tesla app opens &mdash; confirm adding the key for that vehicle</li>
+<li>Follow any in-car confirmation prompts (e.g. tap your key card)</li>
+<li>Repeat for each vehicle that needs command access</li>
+</ol>
+{''.join(cards) if cards else '<p>Could not list vehicles &mdash; visit <a href="/login">/login</a> first.</p>'}
+<p class='mono'>public key: https://{domain}{WELL_KNOWN_PUBLIC_KEY_PATH}</p>
+</body></html>"""
+    return HTMLResponse(html)
 
 
 @app.get("/health")
