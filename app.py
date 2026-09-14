@@ -157,6 +157,35 @@ def debug_tokens():
     return {"keys": list(TOKENS.keys()), "tokens": out}
 
 
+@app.get("/api/vehicles")
+async def list_vehicles():
+    token_data = TOKENS.get("default")
+    if not token_data:
+        raise HTTPException(status_code=401, detail="no tokens stored; visit /login first")
+    access_token = token_data.get("access_token")
+    if not access_token:
+        raise HTTPException(status_code=500, detail="stored token has no access_token field")
+
+    url = f"{TESLA_API_URL}/api/1/vehicles"
+    log.info("Calling Tesla Fleet API: GET %s", url)
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get(
+            url,
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+    if resp.status_code != 200:
+        log.error("Tesla API error (%s): %s", resp.status_code, resp.text[:500])
+        return JSONResponse(
+            {
+                "error": "tesla_api_error",
+                "status": resp.status_code,
+                "body": resp.text[:1000],
+            },
+            status_code=resp.status_code,
+        )
+    return JSONResponse(resp.json())
+
+
 @app.post("/webhook/tesla")
 async def webhook_tesla(request: Request):
     body = await request.body()
