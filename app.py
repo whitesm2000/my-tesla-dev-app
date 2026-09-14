@@ -536,7 +536,7 @@ async def _proxy_command(vehicle_id: str, command: str, token: str, body: dict |
     url = f"{PROXY_URL}/api/1/vehicles/{vin}/command/{command}"
     log.info("proxy command %s on vin %s", command, vin)
     try:
-        async with httpx.AsyncClient(timeout=90) as client:
+        async with httpx.AsyncClient(timeout=90, verify=False) as client:
             resp = await client.post(
                 url,
                 headers={"Authorization": f"Bearer {token}"},
@@ -710,7 +710,7 @@ async def webhook_tesla(request: Request):
 async def debug_proxy():
     """Is the local tesla-http-proxy alive?"""
     try:
-        async with httpx.AsyncClient(timeout=5) as client:
+        async with httpx.AsyncClient(timeout=5, verify=False) as client:
             resp = await client.get(PROXY_URL)
         return {"proxy_url": PROXY_URL, "alive": True, "status": resp.status_code}
     except httpx.ConnectError:
