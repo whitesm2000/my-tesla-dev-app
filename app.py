@@ -6,8 +6,10 @@ import secrets
 import time
 
 import httpx
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ec
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("tesla-dev-app")
@@ -29,9 +31,13 @@ DEFAULT_SCOPES = (
 
 TOKENS: dict = {}
 STATE_STORE: dict = {}
+PARTNER_TOKEN: dict = {}
 STATE_TTL_SECONDS = 600
 
 TOKEN_STORE_PATH = os.getenv("TOKEN_STORE_PATH", "/var/data/tesla_tokens.json")
+PRIVATE_KEY_PATH = os.getenv("PRIVATE_KEY_PATH", "/var/data/tesla_private_key.pem")
+PUBLIC_KEY_PATH = os.getenv("PUBLIC_KEY_PATH", "/var/data/tesla_public_key.pem")
+WELL_KNOWN_PUBLIC_KEY_PATH = "/.well-known/appspecific/com.tesla.3p.public-key.pem"
 
 
 def _now() -> int:
@@ -70,7 +76,32 @@ def _save_tokens() -> bool:
         return False
 
 
+def _load_or_generate_keypair() -> None:
+    os.makedirs(os.path.dirname(PRIVATE_KEY_PATH), exist_ok=True)
+    if os.path.exists(PRIVATE_KEY_PATH) and os.path.exists(PUBLIC_KEY_PATH):
+        log.info("Using existing keypair at %s", PRIVATE_KEY_PATH)
+        return
+    log.info("Generating new EC secp256r1 keypair")
+    private_key = ec.generate_private_key(ec.SECP256R1())
+    private_pem = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    public_key = private_key.public_key()
+    public_pem = public_key.public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    with open(PRIVATE_KEY_PATH, "wb") as f:
+        f.write(private_pem)
+    with open(PUBLIC_KEY_PATH, "wb") as f:
+        f.write(public_pem)
+    log.info("Saved keypair to %s and %s", PRIVATE_KEY_PATH, PUBLIC_KEY_PATH)
+
+
 _load_tokens()
+_load_or_generate_keypair()
 
 
 @app.get("/")
@@ -243,6 +274,76 @@ async def list_vehicles():
             status_code=resp.status_code,
         )
     return JSONResponse(resp.json())
+
+
+@app.get(WELL_KNOWN_PUBLIC_KEY_PATH)
+def serve_tesla_public_key():
+    if not os.path.exists(PUBLIC_KEY_PATH):
+        raise HTTPException(status_code=500, detail="public key not generated yet")
+    return FileResponse(
+        PUBLIC_KEY_PATH,
+        media_type="application/x-pem-file",
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
+
+
+async def _mint_partner_token() -> dict:
+    global PARTNER_TOKEN
+    if PARTNER_TOKEN.get("_expires_at", 0) > _now() + 60:
+        return PARTNER_TOKEN
+    log.info("Minting partner token via client_credentials")
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(
+            f"{TESLA_AUTH_URL}/oauth2/v3/token",
+            data={
+                "grant_type": "client_credentials",
+                "client_id": TESLA_CLIENT_ID,
+                "client_secret": TESLA_CLIENT_SECRET,
+                "scope": "openid email offline_access",
+                "audience": TESLA_API_URL,
+            },
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+    if resp.status_code != 200:
+        raise HTTPException(
+            status_code=resp.status_code,
+            detail={"error": "partner_token_failed", "body": resp.text[:500]},
+        )
+    tok = resp.json()
+    tok["_expires_at"] = _now() + int(tok.get("expires_in", 3600))
+    PARTNER_TOKEN = tok
+    log.info("Partner token minted, expires_at=%s", tok["_expires_at"])
+    return tok
+
+
+@app.post("/api/register")
+async def register_partner():
+    """Register this app as a partner account with the Tesla region.
+    Required once per developer account per region before /api/1/* endpoints work."""
+    if not TESLA_CLIENT_ID or not TESLA_CLIENT_SECRET:
+        raise HTTPException(status_code=500, detail="missing client credentials")
+
+    domain = TESLA_REDIRECT_URI.split("//", 1)[-1].split("/", 1)[0]
+    root_domain = ".".join(domain.split(".")[-2:])
+    public_key_pem = open(PUBLIC_KEY_PATH, "rb").read().decode()
+
+    tok = await _mint_partner_token()
+    url = f"{TESLA_API_URL}/api/1/partner_accounts"
+    log.info("Registering partner account (domain=%s, root=%s)", domain, root_domain)
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(
+            url,
+            headers={"Authorization": f"Bearer {tok['access_token']}"},
+            json={"domain": root_domain, "public_key": public_key_pem},
+        )
+    return JSONResponse(
+        {
+            "status": resp.status_code,
+            "body": resp.text[:2000],
+            "registered_domain": root_domain,
+        },
+        status_code=resp.status_code if resp.status_code < 400 else 502,
+    )
 
 
 @app.post("/webhook/tesla")
