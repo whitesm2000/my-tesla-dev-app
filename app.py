@@ -745,7 +745,7 @@ async def enroll_keys():
 
     cards = []
     for v in vehicles:
-        link = f"https://tesla.com/_ak/*{domain}*?vin={v['vin']}"
+        link = f"https://tesla.com/_ak/{domain}?vin={v['vin']}"
         img = qrcode.make(link)
         buf = io.BytesIO()
         img.save(buf, format="PNG")
