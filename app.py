@@ -325,16 +325,41 @@ async def vehicle_detail(vehicle_id: str):
 @app.get("/api/vehicle/{vehicle_id}/data")
 async def vehicle_data(vehicle_id: str, endpoints: str = "charge_state;vehicle_state;drive_state;climate_state;location_data"):
     """Live vehicle data. Pass `endpoints` query param like `charge_state;drive_state` to choose fields."""
-    body = {"endpoints": endpoints.split(";")}
-    return JSONResponse(await _vehicle_post("/vehicle_data", vehicle_id, body))
+    token = await _user_token()
+    url = f"{TESLA_API_URL}/api/1/vehicles/{vehicle_id}/vehicle_data"
+    log.info("vehicle_data: %s", url)
+    async with httpx.AsyncClient(timeout=60) as client:
+        resp = await client.get(
+            url,
+            headers={"Authorization": f"Bearer {token}"},
+            params={"endpoints": endpoints},
+        )
+    if resp.status_code != 200:
+        log.error("vehicle_data %s -> %s: %s", url, resp.status_code, resp.text[:300])
+        return JSONResponse(
+            {"error": "tesla_api_error", "status": resp.status_code, "body": resp.text[:1000]},
+            status_code=resp.status_code,
+        )
+    return JSONResponse(resp.json())
 
 
 @app.get("/api/vehicle/{vehicle_id}/location")
 async def vehicle_location(vehicle_id: str):
     """Vehicle's last-known GPS coordinates."""
-    body = {"endpoints": ["location_data"]}
-    data = await _vehicle_post("/vehicle_data", vehicle_id, body)
-    loc = (data or {}).get("response", {}).get("location_data") or {}
+    token = await _user_token()
+    url = f"{TESLA_API_URL}/api/1/vehicles/{vehicle_id}/vehicle_data"
+    async with httpx.AsyncClient(timeout=60) as client:
+        resp = await client.get(
+            url,
+            headers={"Authorization": f"Bearer {token}"},
+            params={"endpoints": "location_data"},
+        )
+    if resp.status_code != 200:
+        return JSONResponse(
+            {"error": "tesla_api_error", "status": resp.status_code, "body": resp.text[:1000]},
+            status_code=resp.status_code,
+        )
+    loc = (resp.json() or {}).get("response", {}).get("location_data") or {}
     return JSONResponse(
         {
             "latitude": loc.get("latitude"),
@@ -349,17 +374,39 @@ async def vehicle_location(vehicle_id: str):
 @app.get("/api/vehicle/{vehicle_id}/charge")
 async def vehicle_charge(vehicle_id: str):
     """Battery, range, charging state."""
-    body = {"endpoints": ["charge_state"]}
-    data = await _vehicle_post("/vehicle_data", vehicle_id, body)
-    return JSONResponse((data or {}).get("response", {}).get("charge_state", data))
+    token = await _user_token()
+    url = f"{TESLA_API_URL}/api/1/vehicles/{vehicle_id}/vehicle_data"
+    async with httpx.AsyncClient(timeout=60) as client:
+        resp = await client.get(
+            url,
+            headers={"Authorization": f"Bearer {token}"},
+            params={"endpoints": "charge_state"},
+        )
+    if resp.status_code != 200:
+        return JSONResponse(
+            {"error": "tesla_api_error", "status": resp.status_code, "body": resp.text[:1000]},
+            status_code=resp.status_code,
+        )
+    return JSONResponse((resp.json() or {}).get("response", {}).get("charge_state", {}))
 
 
 @app.get("/api/vehicle/{vehicle_id}/climate")
 async def vehicle_climate(vehicle_id: str):
     """Inside / outside temp, climate settings."""
-    body = {"endpoints": ["climate_state"]}
-    data = await _vehicle_post("/vehicle_data", vehicle_id, body)
-    return JSONResponse((data or {}).get("response", {}).get("climate_state", data))
+    token = await _user_token()
+    url = f"{TESLA_API_URL}/api/1/vehicles/{vehicle_id}/vehicle_data"
+    async with httpx.AsyncClient(timeout=60) as client:
+        resp = await client.get(
+            url,
+            headers={"Authorization": f"Bearer {token}"},
+            params={"endpoints": "climate_state"},
+        )
+    if resp.status_code != 200:
+        return JSONResponse(
+            {"error": "tesla_api_error", "status": resp.status_code, "body": resp.text[:1000]},
+            status_code=resp.status_code,
+        )
+    return JSONResponse((resp.json() or {}).get("response", {}).get("climate_state", {}))
 
 
 @app.post("/api/vehicle/{vehicle_id}/wake_up")
