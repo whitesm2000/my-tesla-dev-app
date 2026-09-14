@@ -276,6 +276,98 @@ async def list_vehicles():
     return JSONResponse(resp.json())
 
 
+async def _user_token() -> str:
+    token_data = TOKENS.get("default")
+    if not token_data:
+        raise HTTPException(status_code=401, detail="no tokens stored; visit /login first")
+    access_token = token_data.get("access_token")
+    if not access_token:
+        raise HTTPException(status_code=500, detail="stored token has no access_token field")
+    return access_token
+
+
+async def _vehicle_get(path: str, vehicle_id: str | None = None) -> dict:
+    token = await _user_token()
+    url = f"{TESLA_API_URL}/api/1/vehicles"
+    if vehicle_id:
+        url = f"{url}/{vehicle_id}{path}"
+    else:
+        url = f"{url}{path}"
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get(url, headers={"Authorization": f"Bearer {token}"})
+    if resp.status_code != 200:
+        log.error("Tesla API GET %s -> %s: %s", url, resp.status_code, resp.text[:300])
+        return {"error": "tesla_api_error", "status": resp.status_code, "body": resp.text[:1000]}
+    return resp.json()
+
+
+async def _vehicle_post(path: str, vehicle_id: str, body: dict | None = None) -> dict:
+    token = await _user_token()
+    url = f"{TESLA_API_URL}/api/1/vehicles/{vehicle_id}{path}"
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(
+            url,
+            headers={"Authorization": f"Bearer {token}"},
+            json=body or {},
+        )
+    if resp.status_code not in (200, 201, 202):
+        log.error("Tesla API POST %s -> %s: %s", url, resp.status_code, resp.text[:300])
+        return {"error": "tesla_api_error", "status": resp.status_code, "body": resp.text[:1000]}
+    return resp.json() if resp.text else {"ok": True}
+
+
+@app.get("/api/vehicle/{vehicle_id}")
+async def vehicle_detail(vehicle_id: str):
+    """One vehicle's metadata."""
+    return JSONResponse(await _vehicle_get("", vehicle_id))
+
+
+@app.get("/api/vehicle/{vehicle_id}/data")
+async def vehicle_data(vehicle_id: str, endpoints: str = "charge_state;vehicle_state;drive_state;climate_state;location_data"):
+    """Live vehicle data. Pass `endpoints` query param like `charge_state;drive_state` to choose fields."""
+    body = {"endpoints": endpoints.split(";")}
+    return JSONResponse(await _vehicle_post("/vehicle_data", vehicle_id, body))
+
+
+@app.get("/api/vehicle/{vehicle_id}/location")
+async def vehicle_location(vehicle_id: str):
+    """Vehicle's last-known GPS coordinates."""
+    body = {"endpoints": ["location_data"]}
+    data = await _vehicle_post("/vehicle_data", vehicle_id, body)
+    loc = (data or {}).get("response", {}).get("location_data") or {}
+    return JSONResponse(
+        {
+            "latitude": loc.get("latitude"),
+            "longitude": loc.get("longitude"),
+            "heading": loc.get("heading"),
+            "timestamp": loc.get("timestamp"),
+            "raw": loc,
+        }
+    )
+
+
+@app.get("/api/vehicle/{vehicle_id}/charge")
+async def vehicle_charge(vehicle_id: str):
+    """Battery, range, charging state."""
+    body = {"endpoints": ["charge_state"]}
+    data = await _vehicle_post("/vehicle_data", vehicle_id, body)
+    return JSONResponse((data or {}).get("response", {}).get("charge_state", data))
+
+
+@app.get("/api/vehicle/{vehicle_id}/climate")
+async def vehicle_climate(vehicle_id: str):
+    """Inside / outside temp, climate settings."""
+    body = {"endpoints": ["climate_state"]}
+    data = await _vehicle_post("/vehicle_data", vehicle_id, body)
+    return JSONResponse((data or {}).get("response", {}).get("climate_state", data))
+
+
+@app.post("/api/vehicle/{vehicle_id}/wake_up")
+async def vehicle_wake(vehicle_id: str):
+    """Wake the car up. Cars sleep deeply; first API call after sleep needs this."""
+    return JSONResponse(await _vehicle_post("/wake_up", vehicle_id))
+
+
 @app.get(WELL_KNOWN_PUBLIC_KEY_PATH)
 def serve_tesla_public_key():
     if not os.path.exists(PUBLIC_KEY_PATH):
