@@ -10,6 +10,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from pydantic import BaseModel, ConfigDict, Field
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("tesla-dev-app")
@@ -566,6 +567,26 @@ async def _proxy_command(vehicle_id: str, command: str, token: str, body: dict |
     data["_via"] = "signed_proxy"
     data["_proxy_status"] = resp.status_code
     return data
+
+
+class NavigationDestination(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+    destination: str = Field(min_length=1, max_length=2000)
+
+
+@app.post("/api/vehicle/{vehicle_id}/navigate")
+async def cmd_navigate(vehicle_id: str, destination: NavigationDestination, confirm: str | None = None):
+    """Share an address or place with the vehicle's navigation system."""
+    _require_confirm(confirm, "navigate")
+    body = {
+        "type": "share_ext_content_raw",
+        "value": {"android.intent.extra.TEXT": destination.destination},
+        "locale": "en-US",
+        "timestamp_ms": int(time.time() * 1000),
+    }
+    # Tesla resolves shared text server-side; the official proxy also routes
+    # navigation_request through the REST API (ErrCommandUseRESTAPI).
+    return JSONResponse(await _vehicle_command(vehicle_id, "navigation_request", body))
 
 
 @app.post("/api/vehicle/{vehicle_id}/flash_lights")

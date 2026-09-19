@@ -1,0 +1,240 @@
+#!/usr/bin/env python3
+"""tesla — control the family Teslas via the Fleet API service.
+
+Reads:
+  tesla status                      all cars: name, VIN, state, battery
+  tesla charge <car>                battery, range, charging state
+  tesla climate <car>               cabin/outside temps
+  tesla location <car>              GPS coordinates
+  tesla data <car> [endpoints]      raw vehicle_data (default: charge;drive;climate;location)
+
+Commands (require --yes):
+  tesla navigate <car> "<address or place>"  send navigation destination
+  tesla wake <car>
+  tesla flash <car>                 flash headlights
+  tesla honk <car>
+  tesla lock <car> / tesla unlock <car>
+  tesla climate <car> on|off        start/stop preconditioning
+  tesla temps <car> <driverC> [passengerC]
+  tesla charge-start <car> / tesla charge-stop <car>
+  tesla charge-limit <car> <pct>
+  tesla port <car> open|close
+
+Cars: cybertruck (or truck), model3 (or 3), modelx (or x). Also accepts a VIN prefix.
+
+Config: ~/.config/tesla/config.json  {base_url, token}
+"""
+import json
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+CONFIG_PATH = Path.home() / ".config/tesla/config.json"
+
+ALIASES = {
+    "cybertruck": ["cybertruck", "truck", "ct", "jp cybertruck"],
+    "model3": ["model3", "3", "m3", "jp tesla 3", "tesla 3"],
+    "modelx": ["modelx", "x", "mx"],
+}
+
+
+def die(msg, code=1):
+    print(f"error: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def load_config():
+    if not CONFIG_PATH.exists():
+        die(f'missing {CONFIG_PATH} — expected {{"base_url", "token"}}')
+    cfg = json.loads(CONFIG_PATH.read_text())
+    if not cfg.get("base_url") or not cfg.get("token"):
+        die("config needs base_url and token")
+    return cfg
+
+
+def api(cfg, path, method="GET", body=None):
+    req = urllib.request.Request(
+        cfg["base_url"] + path,
+        method=method,
+        headers={
+            "Authorization": f"Bearer {cfg['token']}",
+            "Content-Type": "application/json",
+        },
+        data=json.dumps(body).encode() if body is not None else None,
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            text = resp.read().decode()
+            return json.loads(text) if text else {}
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode()[:300]
+        die(f"API {e.code} on {path}: {detail}")
+    except urllib.error.URLError as e:
+        die(f"cannot reach {cfg['base_url']}: {e.reason}")
+
+
+def get_vehicles(cfg):
+    return api(cfg, "/api/vehicles").get("response", [])
+
+
+def resolve_car(cfg, name):
+    """Match a car by alias, display-name substring, or VIN prefix."""
+    q = name.lower().strip()
+    vehicles = get_vehicles(cfg)
+    for v in vehicles:
+        vin = v["vin"].lower()
+        display = (v.get("display_name") or "").lower()
+        if vin.startswith(q):
+            return v
+        if display and (q in display or display.replace(" ", "") == q):
+            return v
+        for canonical, aliases in ALIASES.items():
+            if q in aliases:
+                if canonical in display:
+                    return v
+                if canonical == "cybertruck" and vin.startswith("7g2"):
+                    return v
+                if canonical == "model3" and vin.startswith("5yj3"):
+                    return v
+                if canonical == "modelx" and vin.startswith("5yjx"):
+                    return v
+    listing = "\n".join(
+        f"  {(v.get('display_name') or '(unnamed)'):16s} {v['vin']}  state={v['state']}"
+        for v in vehicles
+    )
+    die(f"no vehicle matches '{name}'. Known vehicles:\n{listing}")
+
+
+def cmd_status(cfg):
+    for v in get_vehicles(cfg):
+        name = v.get("display_name") or "(unnamed)"
+        print(f"{name}  [{v['vin']}]  state={v['state']}")
+        try:
+            c = api(cfg, f"/api/vehicle/{v['id_s']}/charge")
+        except SystemExit:
+            c = {}
+        if c.get("battery_level") is not None:
+            print(
+                f"  battery={c.get('battery_level')}%"
+                f"  range={c.get('battery_range')}"
+                f"  charging={c.get('charging_state')}"
+                f"  limit={c.get('charge_limit_soc')}%"
+            )
+        print()
+
+
+def cmd_charge(cfg, car):
+    v = resolve_car(cfg, car)
+    c = api(cfg, f"/api/vehicle/{v['id_s']}/charge")
+    print(v.get("display_name") or v["vin"])
+    for k in (
+        "battery_level", "battery_range", "charge_limit_soc", "charging_state",
+        "charge_rate", "minutes_to_full_charge", "charger_power",
+        "charge_port_door_open",
+    ):
+        if k in c:
+            print(f"  {k:24s} {c[k]}")
+
+
+def cmd_climate(cfg, car):
+    v = resolve_car(cfg, car)
+    c = api(cfg, f"/api/vehicle/{v['id_s']}/climate")
+    for k in (
+        "inside_temp", "outside_temp", "is_climate_on",
+        "driver_temp_setting", "passenger_temp_setting",
+    ):
+        if k in c:
+            print(f"  {k:24s} {c[k]}")
+
+
+def cmd_location(cfg, car):
+    v = resolve_car(cfg, car)
+    loc = api(cfg, f"/api/vehicle/{v['id_s']}/location")
+    if loc.get("latitude") is None:
+        print("  no location (car asleep, or location sharing not enabled)")
+    else:
+        print(f"  lat={loc['latitude']}  lng={loc['longitude']}  heading={loc.get('heading')}")
+
+
+def cmd_data(cfg, args):
+    car = args[0]
+    endpoints = ";".join(args[1:]) if len(args) > 1 else "charge_state;drive_state;climate_state;location_data"
+    v = resolve_car(cfg, car)
+    print(json.dumps(api(cfg, f"/api/vehicle/{v['id_s']}/data?endpoints={endpoints}"), indent=2))
+
+
+def run_command(cfg, car, path, body=None, extra_args=()):
+    """Execute a mutating command. Requires --yes in argv."""
+    if "--yes" not in sys.argv:
+        die(f"commands require --yes  (e.g. tesla {path.split('?')[0].split('/')[-1]} {car} --yes)")
+    v = resolve_car(cfg, car)
+    resp = api(cfg, f"/api/vehicle/{v['id_s']}/{path}?confirm=true", "POST", body)
+    r = resp.get("response") or {}
+    via = " (signed)" if resp.get("_via") == "signed_proxy" else ""
+    if r.get("result") is True:
+        print(f"ok{via}: {path}")
+    elif resp.get("error"):
+        print(f"rejected{via}: {resp.get('error')} {resp.get('detail') or ''}")
+        sys.exit(1)
+    else:
+        print(json.dumps(resp, indent=2))
+        sys.exit(1)
+
+
+def main():
+    argv = sys.argv[1:]
+    confirmed = "--yes" in argv
+    argv = [a for a in argv if a != "--yes"]
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        print(__doc__)
+        return
+    cfg = load_config()
+    cmd, args = argv[0], argv[1:]
+
+    if cmd == "status" and not args:
+        cmd_status(cfg)
+    elif cmd == "charge" and len(args) == 1:
+        cmd_charge(cfg, args[0])
+    elif cmd == "climate" and len(args) == 1:
+        cmd_climate(cfg, args[0])
+    elif cmd == "location" and len(args) == 1:
+        cmd_location(cfg, args[0])
+    elif cmd == "data" and args:
+        cmd_data(cfg, args)
+    elif cmd == "navigate" and len(args) == 2:
+        destination = args[1].strip()
+        if not destination or len(destination) > 2000:
+            die("destination must contain 1 to 2000 characters")
+        run_command(cfg, args[0], "navigate", {"destination": destination})
+    elif cmd == "wake" and len(args) == 1:
+        run_command(cfg, args[0], "wake_up")
+    elif cmd == "flash" and len(args) == 1:
+        run_command(cfg, args[0], "flash_lights")
+    elif cmd == "honk" and len(args) == 1:
+        run_command(cfg, args[0], "honk_horn")
+    elif cmd == "lock" and len(args) == 1:
+        run_command(cfg, args[0], "lock")
+    elif cmd == "unlock" and len(args) == 1:
+        run_command(cfg, args[0], "unlock")
+    elif cmd == "charge-start" and len(args) == 1:
+        run_command(cfg, args[0], "charge_start")
+    elif cmd == "charge-stop" and len(args) == 1:
+        run_command(cfg, args[0], "charge_stop")
+    elif cmd == "climate" and len(args) == 2 and args[1] in ("on", "off"):
+        run_command(cfg, args[0], f"climate_{args[1]}")
+    elif cmd == "temps" and len(args) in (2, 3):
+        body = {"driver": float(args[1])}
+        if len(args) == 3:
+            body["passenger"] = float(args[2])
+        run_command(cfg, args[0], "set_temps", body)
+    elif cmd == "charge-limit" and len(args) == 2:
+        run_command(cfg, args[0], "set_charge_limit", {"percent": int(args[1])})
+    elif cmd == "port" and len(args) == 2 and args[1] in ("open", "close"):
+        run_command(cfg, args[0], f"charge_port_{args[1]}")
+    else:
+        die(f"bad usage — run: tesla help")
+
+
+if __name__ == "__main__":
+    main()

@@ -210,3 +210,26 @@ export PUBLIC_KEY_PATH=/tmp/tesla_public_key.pem
 
 uvicorn app:app --reload --port 3000
 ```
+
+
+## Send a navigation destination
+
+Install the versioned CLI with `install -m 755 cli/tesla ~/.local/bin/tesla`.
+
+```bash
+tesla navigate cybertruck "123 Main St, Washington, DC" --yes
+```
+
+Use a full address or unambiguous place name in quotes. This shares the text
+with the car's navigation system; it does not drive the vehicle. No automatic
+wake or retry is performed. If Tesla reports the car asleep, wake it explicitly
+and retry. A successful response means Tesla accepted the command; verify the
+resolved destination on the car's screen before using the route.
+
+API: `POST /api/vehicle/{id}/navigate?confirm=true` with JSON
+`{"destination":"123 Main St, Washington, DC"}` and the existing bearer token.
+Empty, whitespace-only, non-string and overlong destinations are rejected.
+This uses Tesla's `navigation_request` REST command and existing command routing.
+
+Tests (mocked Tesla traffic, no vehicle commands):
+`python -m unittest discover -s tests -v`.
