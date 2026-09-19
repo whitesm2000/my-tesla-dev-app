@@ -284,12 +284,7 @@ def debug_persistence():
 
 @app.get("/api/vehicles")
 async def list_vehicles():
-    token_data = TOKENS.get("default")
-    if not token_data:
-        raise HTTPException(status_code=401, detail="no tokens stored; visit /login first")
-    access_token = token_data.get("access_token")
-    if not access_token:
-        raise HTTPException(status_code=500, detail="stored token has no access_token field")
+    access_token = await _user_token()
 
     url = f"{TESLA_API_URL}/api/1/vehicles"
     log.info("Calling Tesla Fleet API: GET %s", url)

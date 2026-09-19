@@ -26,6 +26,15 @@ class NavigationTests(unittest.TestCase):
         self.headers = {'Authorization': 'Bearer test-token'}
         self.url = '/api/vehicle/test-vehicle/navigate'
 
+    def test_vehicle_listing_uses_refresh_helper(self):
+        import httpx
+        response = httpx.Response(200, json={"response": []})
+        with patch.object(app, '_user_token', new_callable=AsyncMock, return_value='refreshed-token') as token, patch.object(app.httpx.AsyncClient, 'get', new_callable=AsyncMock, return_value=response) as get:
+            result = self.client.get('/api/vehicles', headers=self.headers)
+            self.assertEqual(result.status_code, 200)
+            token.assert_awaited_once()
+            self.assertEqual(get.call_args.kwargs['headers']['Authorization'], 'Bearer refreshed-token')
+
     def test_auth_and_confirmation_prevent_forwarding(self):
         with patch.object(app, '_vehicle_command', new_callable=AsyncMock) as send:
             self.assertEqual(self.client.post(self.url+'?confirm=true', json={'destination': 'Test'}).status_code, 401)
