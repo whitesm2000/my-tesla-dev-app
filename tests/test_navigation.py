@@ -35,6 +35,30 @@ class NavigationTests(unittest.TestCase):
             token.assert_awaited_once()
             self.assertEqual(get.call_args.kwargs['headers']['Authorization'], 'Bearer refreshed-token')
 
+    def test_location_reads_drive_state_from_location_data_request(self):
+        import httpx
+        drive_state = {
+            'latitude': 38.974833,
+            'longitude': -77.023245,
+            'heading': 297,
+            'timestamp': 1790428488844,
+        }
+        upstream = httpx.Response(200, json={'response': {'drive_state': drive_state}})
+        with patch.object(app, '_user_token', new_callable=AsyncMock, return_value='refreshed-token'), patch.object(app.httpx.AsyncClient, 'get', new_callable=AsyncMock, return_value=upstream) as get:
+            result = self.client.get('/api/vehicle/test-vehicle/location', headers=self.headers)
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(result.json(), {**drive_state, 'raw': drive_state})
+        self.assertEqual(get.call_args.kwargs['params'], {'endpoints': 'location_data'})
+
+    def test_location_without_coordinates_returns_nulls(self):
+        import httpx
+        upstream = httpx.Response(200, json={'response': {'drive_state': {'shift_state': 'P'}}})
+        with patch.object(app, '_user_token', new_callable=AsyncMock, return_value='refreshed-token'), patch.object(app.httpx.AsyncClient, 'get', new_callable=AsyncMock, return_value=upstream):
+            result = self.client.get('/api/vehicle/test-vehicle/location', headers=self.headers)
+        self.assertEqual(result.status_code, 200)
+        self.assertIsNone(result.json()['latitude'])
+        self.assertIsNone(result.json()['longitude'])
+
     def test_auth_and_confirmation_prevent_forwarding(self):
         with patch.object(app, '_vehicle_command', new_callable=AsyncMock) as send:
             self.assertEqual(self.client.post(self.url+'?confirm=true', json={'destination': 'Test'}).status_code, 401)

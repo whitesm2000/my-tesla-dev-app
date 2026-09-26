@@ -417,7 +417,8 @@ async def vehicle_location(vehicle_id: str):
             {"error": "tesla_api_error", "status": resp.status_code, "body": resp.text[:1000]},
             status_code=resp.status_code,
         )
-    loc = (resp.json() or {}).get("response", {}).get("location_data") or {}
+    # location_data is the requested endpoint; Tesla returns GPS in drive_state.
+    loc = (resp.json() or {}).get("response", {}).get("drive_state") or {}
     return JSONResponse(
         {
             "latitude": loc.get("latitude"),

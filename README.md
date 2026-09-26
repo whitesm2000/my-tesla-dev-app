@@ -187,7 +187,7 @@ vehicles           partner_accounts vehicles/...
 - **Webhooks**: `/webhook/tesla` is a stub. Need to:
   - Verify Tesla's signature header (uses the registered EC public key)
   - Implement `fleet_telemetry_config` registration so Tesla pushes events
-- **Location**: Tesla requires explicit consent + a `location_data` endpoint query to share GPS. Currently returns null until the user enables location sharing on the Tesla app.
+- **Location**: Tesla requires the `vehicle_location` scope and a `location_data` endpoint query to share GPS. Coordinates are returned in `drive_state` when available.
 - **Refresh token rotation**: We persist `refresh_token` but don't proactively rotate it. If Tesla issues a new refresh_token, we save it.
 - **Energy endpoints**: Scopes are enabled but no endpoints implemented yet.
 
