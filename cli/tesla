@@ -152,7 +152,7 @@ def cmd_location(cfg, car):
     v = resolve_car(cfg, car)
     loc = api(cfg, f"/api/vehicle/{v['id_s']}/location")
     if loc.get("latitude") is None:
-        print("  no location (car asleep, or location sharing not enabled)")
+        print("  no coordinates returned by Tesla")
     else:
         print(f"  lat={loc['latitude']}  lng={loc['longitude']}  heading={loc.get('heading')}")
 
